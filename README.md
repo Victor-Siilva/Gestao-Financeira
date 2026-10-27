@@ -30,8 +30,8 @@ npm run format:check
 - Registro de horas ou diárias por funcionário e data.
 - Cálculo automático da folha mensal e do resultado financeiro do período selecionado.
 - Exportação de relatório em PDF com gráfico geral, apuração da folha, todos os funcionários e os lançamentos do mês.
-- Dados armazenados no `localStorage` do navegador.
-- Schema SQL inicial em `supabase/schema.sql`.
+- Com Supabase configurado: login por e-mail/senha e armazenamento remoto de funcionários, lançamentos e registros de trabalho.
+- Sem Supabase configurado: modo local, com dados salvos no `localStorage` do navegador.
 
 ## Regras do cálculo
 
@@ -44,10 +44,18 @@ npm run format:check
 
 Os registros de trabalho guardam uma cópia do nome, cargo e valor-base do funcionário no momento do lançamento. Salários mensais usam o cadastro atual de funcionários ativos; o histórico de alterações salariais não é mantido.
 
-## Integração e segurança
+## Configurar Supabase
 
-A aplicação ainda usa armazenamento local do navegador. A conexão client-side do Supabase está preparada em `src/lib/supabase.ts`, mas CRUD remoto, autenticação, segregação por empresa e policies de produção **não estão implementados**. Não coloque credenciais secretas no frontend. Antes de usar com dados reais, implemente autenticação e Row Level Security (RLS) com escopo por empresa.
+1. Crie um projeto no Supabase e abra o **SQL Editor**.
+2. Execute o conteúdo completo de `supabase/schema.sql` para criar/atualizar as tabelas e as políticas RLS.
+3. Copie `.env.example` para `.env.local` e informe a URL do projeto e a chave **anon/public** em `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`.
+4. Reinicie o Vite (`npm run dev`) e crie o primeiro usuário na tela de acesso.
+5. Se a confirmação de e-mail estiver habilitada no Supabase, confirme o endereço antes de entrar.
 
-Para configurar as variáveis, copie `.env.example` para `.env.local` e preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`. Isso, por si só, não conecta os formulários ao banco.
+No painel Supabase, deixe habilitado o provedor de autenticação por e-mail/senha. As políticas Row Level Security limitam cada conta aos próprios dados. Este projeto está configurado para **uma conta responsável por conjunto de dados**; compartilhar os dados com outras contas da equipe exige implementar organizações e associação de membros. Nunca use a chave `service_role` no frontend ou em `.env.local`.
+
+Na primeira autenticação, se o banco estiver vazio, os dados já salvos neste navegador são migrados para a conta. Se o banco já possuir registros, os dados locais não são importados automaticamente e permanecem no navegador. Mantenha uma cópia antes de mudar de conta ou limpar os dados do navegador.
+
+O modo local continua disponível quando as variáveis não estão configuradas, mas seus dados não são enviados à nuvem. O Supabase Free tem limites de uso e disponibilidade; acompanhe o painel do projeto e mantenha cópias de segurança.
 
 Os dados iniciais são demonstrativos. Revise o escopo antes do uso real, especialmente impostos, pró-labore, recorrências, faltas, adiantamentos, anexos e permissões de acesso.

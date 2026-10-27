@@ -18,7 +18,9 @@ import {
   Pencil,
   CircleDollarSign,
   BriefcaseBusiness,
+  LogOut,
 } from 'lucide-react';
+import type { User } from '@supabase/supabase-js';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -31,34 +33,21 @@ import {
   Pie,
   Cell,
 } from 'recharts';
-import { supabase } from './lib/supabase';
-
-type Employee = {
-  id: string;
-  name: string;
-  role: string;
-  payType: 'Hora' | 'Dia' | 'Mês';
-  rate: number;
-  status: 'Ativo' | 'Inativo';
-};
-type Entry = {
-  id: string;
-  description: string;
-  category: string;
-  amount: number;
-  date: string;
-  type: 'Receita' | 'Despesa';
-};
-type WorkRecord = {
-  id: string;
-  employeeId: string;
-  employeeName: string;
-  role: string;
-  payType: 'Hora' | 'Dia';
-  rate: number;
-  date: string;
-  quantity: number;
-};
+import {
+  deleteEmployee as deleteEmployeeRemote,
+  deleteEntry as deleteEntryRemote,
+  deleteWorkRecord as deleteWorkRecordRemote,
+  importWorkspaceData,
+  loadWorkspaceData,
+  saveEmployee as saveEmployeeRemote,
+  saveEntry as saveEntryRemote,
+  saveWorkRecord as saveWorkRecordRemote,
+  supabase,
+  type Employee,
+  type Entry,
+  type WorkRecord,
+  type WorkspaceData,
+} from './lib/supabase';
 type PayrollRow = {
   id: string;
   employeeName: string;
@@ -517,9 +506,199 @@ const nav = [
   { id: 'resultado', label: 'Lucros e prejuízos', icon: Wallet },
   { id: 'relatorios', label: 'Relatórios', icon: ChartNoAxesCombined },
 ];
+
+function readLocalWorkspaceData(): WorkspaceData | null {
+  const rawData = {
+    employees: localStorage.getItem('gp-employees'),
+    entries: localStorage.getItem('gp-entries'),
+    workRecords: localStorage.getItem('gp-work-records'),
+  };
+  if (!rawData.employees && !rawData.entries && !rawData.workRecords) return null;
+
+  const parseRows = <T,>(value: string | null, label: string): T[] => {
+    const parsed: unknown = value ? JSON.parse(value) : [];
+    if (!Array.isArray(parsed)) {
+      throw new Error(`Os dados locais de ${label} estão em formato inválido.`);
+    }
+    return parsed as T[];
+  };
+
+  return {
+    employees: parseRows<Employee>(rawData.employees, 'funcionários'),
+    entries: parseRows<Entry>(rawData.entries, 'lançamentos'),
+    workRecords: parseRows<WorkRecord>(rawData.workRecords, 'horas e diárias'),
+  };
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Erro desconhecido.';
+}
+
+function prepareWorkspaceImport(data: WorkspaceData, ownerId: string): WorkspaceData {
+  const mappingKey = `gp-supabase-id-map:${ownerId}`;
+  const idMap = JSON.parse(localStorage.getItem(mappingKey) || '{}') as Record<string, string>;
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const getUuid = (key: string, value: string) => {
+    if (uuidPattern.test(value)) return value;
+    idMap[key] ||= crypto.randomUUID();
+    return idMap[key];
+  };
+  const employeeIds = new Map(
+    data.employees.map((employee) => [
+      employee.id,
+      getUuid(`employee:${employee.id}`, employee.id),
+    ]),
+  );
+  const importedData = {
+    employees: data.employees.map((employee) => ({
+      ...employee,
+      id: employeeIds.get(employee.id)!,
+    })),
+    entries: data.entries.map((entry) => ({
+      ...entry,
+      id: getUuid(`entry:${entry.id}`, entry.id),
+    })),
+    workRecords: data.workRecords.map((record) => ({
+      ...record,
+      id: getUuid(`work-record:${record.id}`, record.id),
+      employeeId:
+        employeeIds.get(record.employeeId) ||
+        getUuid(`employee:${record.employeeId}`, record.employeeId),
+    })),
+  };
+
+  localStorage.setItem(mappingKey, JSON.stringify(idMap));
+  return importedData;
+}
+
+function AuthScreen() {
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!supabase) return;
+
+    setError('');
+    setMessage('');
+    setSubmitting(true);
+    try {
+      if (isSignUp) {
+        const { data, error: signUpError } = await supabase.auth.signUp({ email, password });
+        if (signUpError) throw signUpError;
+        if (!data.session) {
+          setMessage('Conta criada. Confira seu e-mail para confirmar o cadastro e depois entre.');
+        }
+      } else {
+        const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+        if (signInError) throw signInError;
+      }
+    } catch (authError) {
+      setError(authError instanceof Error ? authError.message : 'Não foi possível autenticar.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-page">
+      <form className="auth-card" onSubmit={submit}>
+        <div className="eyebrow">Gestão financeira</div>
+        <h1>{isSignUp ? 'Criar acesso' : 'Entrar no sistema'}</h1>
+        <p>Entre para acessar os dados financeiros salvos com segurança.</p>
+        <label>
+          E-mail
+          <input
+            required
+            type="email"
+            autoComplete="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </label>
+        <label>
+          Senha
+          <input
+            required
+            type="password"
+            minLength={6}
+            autoComplete={isSignUp ? 'new-password' : 'current-password'}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+          {isSignUp && <small>Use pelo menos 6 caracteres.</small>}
+        </label>
+        {error && <p className="auth-message error">{error}</p>}
+        {message && <p className="auth-message success">{message}</p>}
+        <button className="btn primary" type="submit" disabled={submitting}>
+          {submitting ? 'Aguarde...' : isSignUp ? 'Criar conta' : 'Entrar'}
+        </button>
+        <button
+          className="text-btn auth-switch"
+          type="button"
+          onClick={() => {
+            setIsSignUp((current) => !current);
+            setError('');
+            setMessage('');
+          }}
+        >
+          {isSignUp ? 'Já tem uma conta? Entrar' : 'Primeiro acesso? Criar conta'}
+        </button>
+      </form>
+    </main>
+  );
+}
+
+function AuthStatus({
+  message,
+  error,
+  onRetry,
+  onSignOut,
+}: {
+  message: string;
+  error?: string;
+  onRetry?: () => void;
+  onSignOut?: () => void;
+}) {
+  return (
+    <main className="auth-page">
+      <section className="auth-card" aria-live="polite">
+        <div className="eyebrow">Gestão financeira</div>
+        <h1>{error ? 'Conexão indisponível' : 'Conectando...'}</h1>
+        <p>{message}</p>
+        {error && <p className="auth-message error">{error}</p>}
+        {error && (
+          <div className="auth-actions">
+            {onRetry && (
+              <button className="btn primary" onClick={onRetry}>
+                Tentar novamente
+              </button>
+            )}
+            {onSignOut && (
+              <button className="btn secondary" onClick={onSignOut}>
+                Sair
+              </button>
+            )}
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
 export default function App() {
   const [page, setPage] = useState('dashboard'),
     [mobileOpen, setMobileOpen] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(!supabase);
+  const [cloudReady, setCloudReady] = useState(!supabase);
+  const [cloudError, setCloudError] = useState('');
+  const [cloudNotice, setCloudNotice] = useState('');
+  const [cloudLoadAttempt, setCloudLoadAttempt] = useState(0);
   const [employees, setEmployees] = useState<Employee[]>(
     () => JSON.parse(localStorage.getItem('gp-employees') || 'null') || initialEmployees,
   );
@@ -536,15 +715,156 @@ export default function App() {
   const [workRecordModal, setWorkRecordModal] = useState(false);
   const [editingWorkRecord, setEditingWorkRecord] = useState<WorkRecord | null>(null);
   const [notice, setNotice] = useState('');
+  async function signOut() {
+    if (!supabase) return;
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        const message = `Não foi possível encerrar a sessão: ${error.message}`;
+        setCloudError(message);
+        toast(message);
+      }
+    } catch (error) {
+      const message = `Não foi possível encerrar a sessão: ${errorMessage(error)}`;
+      setCloudError(message);
+      toast(message);
+    }
+  }
+
   useEffect(() => {
+    if (!supabase) return;
+    let active = true;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
+      setAuthReady(true);
+    });
+
+    supabase.auth
+      .getSession()
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (error) setCloudError(error.message);
+        setUser(data.session?.user || null);
+        setAuthReady(true);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setCloudError(error instanceof Error ? error.message : 'Falha ao verificar a sessão.');
+        setAuthReady(true);
+      });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !user) {
+      setCloudReady(!supabase);
+      return;
+    }
+
+    const ownerId = user.id;
+    let active = true;
+    setCloudReady(false);
+    setCloudError('');
+    setCloudNotice('');
+
+    async function loadCloudData() {
+      try {
+        let data = await loadWorkspaceData();
+        const migrationKey = `gp-supabase-migrated:${ownerId}`;
+
+        if (localStorage.getItem(migrationKey) !== 'true') {
+          const migrationOwner = localStorage.getItem('gp-supabase-migration-owner');
+          const localData = readLocalWorkspaceData();
+          const cloudIsEmpty =
+            data.employees.length === 0 &&
+            data.entries.length === 0 &&
+            data.workRecords.length === 0;
+          const localHasData =
+            !!localData &&
+            (localData.employees.length > 0 ||
+              localData.entries.length > 0 ||
+              localData.workRecords.length > 0);
+
+          if (localHasData && migrationOwner && migrationOwner !== ownerId) {
+            if (active) {
+              setCloudNotice(
+                'Os dados locais pertencem a outra conta e não foram importados para esta conta.',
+              );
+            }
+          } else if (localHasData && localData && (cloudIsEmpty || migrationOwner === ownerId)) {
+            localStorage.setItem('gp-supabase-migration-owner', ownerId);
+            await importWorkspaceData(ownerId, prepareWorkspaceImport(localData, ownerId));
+            data = await loadWorkspaceData();
+            if (active)
+              setCloudNotice('Os dados salvos neste navegador foram migrados para sua conta.');
+          } else if (!cloudIsEmpty && localHasData) {
+            localStorage.setItem('gp-supabase-migration-owner', ownerId);
+            if (active) {
+              setCloudNotice(
+                'A conta Supabase já tem dados. Os dados locais permanecem neste navegador e não foram importados.',
+              );
+            }
+          }
+          localStorage.setItem(migrationKey, 'true');
+        }
+
+        if (!active) return;
+        setEmployees(data.employees);
+        setEntries(data.entries);
+        setWorkRecords(data.workRecords);
+        setCloudReady(true);
+      } catch (error) {
+        if (!active) return;
+        setCloudError(error instanceof Error ? error.message : 'Falha ao carregar os dados.');
+        setCloudReady(false);
+      }
+    }
+
+    void loadCloudData();
+    return () => {
+      active = false;
+    };
+  }, [user, cloudLoadAttempt]);
+
+  useEffect(() => {
+    if (supabase) return;
     localStorage.setItem('gp-employees', JSON.stringify(employees));
   }, [employees]);
   useEffect(() => {
+    if (supabase) return;
     localStorage.setItem('gp-entries', JSON.stringify(entries));
   }, [entries]);
   useEffect(() => {
+    if (supabase) return;
     localStorage.setItem('gp-work-records', JSON.stringify(workRecords));
   }, [workRecords]);
+
+  if (supabase && !authReady) {
+    return <AuthStatus message="Verificando conexão segura..." />;
+  }
+  if (supabase && !user) {
+    return <AuthScreen />;
+  }
+  if (supabase && !cloudReady) {
+    return (
+      <AuthStatus
+        error={cloudError}
+        message={
+          cloudError
+            ? 'Não foi possível carregar os dados do Supabase.'
+            : 'Carregando seus dados...'
+        }
+        onRetry={cloudError ? () => setCloudLoadAttempt((attempt) => attempt + 1) : undefined}
+        onSignOut={cloudError ? () => void signOut() : undefined}
+      />
+    );
+  }
   const monthEntries = entries.filter((entry) => entry.date.startsWith(payrollMonth));
   const receitas = monthEntries
     .filter((entry) => entry.type === 'Receita')
@@ -589,7 +909,13 @@ export default function App() {
     setNotice(s);
     setTimeout(() => setNotice(''), 3000);
   }
-  function saveEmployee(e: Employee) {
+  async function saveEmployee(e: Employee) {
+    try {
+      if (supabase && user) await saveEmployeeRemote(user.id, e);
+    } catch (error) {
+      toast(`Falha ao salvar funcionário: ${errorMessage(error)}`);
+      return;
+    }
     setEmployees((old) =>
       old.some((x) => x.id === e.id) ? old.map((x) => (x.id === e.id ? e : x)) : [e, ...old],
     );
@@ -597,7 +923,13 @@ export default function App() {
     setEditing(null);
     toast('Funcionário salvo.');
   }
-  function saveEntry(e: Entry) {
+  async function saveEntry(e: Entry) {
+    try {
+      if (supabase && user) await saveEntryRemote(user.id, e);
+    } catch (error) {
+      toast(`Falha ao salvar lançamento: ${errorMessage(error)}`);
+      return;
+    }
     setEntries((old) =>
       old.some((x) => x.id === e.id) ? old.map((x) => (x.id === e.id ? e : x)) : [e, ...old],
     );
@@ -605,7 +937,13 @@ export default function App() {
     setEditing(null);
     toast('Lançamento salvo.');
   }
-  function saveWorkRecord(record: WorkRecord) {
+  async function saveWorkRecord(record: WorkRecord) {
+    try {
+      if (supabase && user) await saveWorkRecordRemote(user.id, record);
+    } catch (error) {
+      toast(`Falha ao salvar horas/diárias: ${errorMessage(error)}`);
+      return;
+    }
     setWorkRecords((current) =>
       current.some((item) => item.id === record.id)
         ? current.map((item) => (item.id === record.id ? record : item))
@@ -615,13 +953,36 @@ export default function App() {
     setEditingWorkRecord(null);
     toast('Horas/diárias registradas.');
   }
-  function removeWorkRecord(id: string) {
+  async function removeWorkRecord(id: string) {
     if (confirm('Excluir este registro de trabalho?')) {
+      try {
+        if (supabase && user) await deleteWorkRecordRemote(user.id, id);
+      } catch (error) {
+        toast(`Falha ao excluir registro: ${errorMessage(error)}`);
+        return;
+      }
       setWorkRecords((current) => current.filter((record) => record.id !== id));
     }
   }
-  function removeEntry(id: string) {
-    if (confirm('Excluir este lançamento?')) setEntries((old) => old.filter((e) => e.id !== id));
+  async function removeEntry(id: string) {
+    if (!confirm('Excluir este lançamento?')) return;
+    try {
+      if (supabase && user) await deleteEntryRemote(user.id, id);
+    } catch (error) {
+      toast(`Falha ao excluir lançamento: ${errorMessage(error)}`);
+      return;
+    }
+    setEntries((old) => old.filter((entry) => entry.id !== id));
+  }
+  async function removeEmployee(id: string) {
+    if (!confirm('Excluir funcionário?')) return;
+    try {
+      if (supabase && user) await deleteEmployeeRemote(user.id, id);
+    } catch (error) {
+      toast(`Falha ao excluir funcionário: ${errorMessage(error)}`);
+      return;
+    }
+    setEmployees((old) => old.filter((employee) => employee.id !== id));
   }
   const filtered = entries.filter(
     (e) =>
@@ -692,10 +1053,19 @@ export default function App() {
             Painel <span>/</span> <b>{title}</b>
           </div>
           <div className="top-actions">
-            <span className="online"> </span>
+            {supabase && (
+              <button
+                className="btn secondary"
+                onClick={() => void signOut()}
+                title="Sair da conta"
+              >
+                <LogOut size={15} /> Sair
+              </button>
+            )}
           </div>
         </header>
         <div className="content">
+          {cloudNotice && <p className="cloud-notice">{cloudNotice}</p>}
           <div className="page-heading">
             <div>
               <div className="eyebrow">Gestão financeira</div>
@@ -993,8 +1363,7 @@ export default function App() {
                               className="icon-btn"
                               title="Excluir"
                               onClick={() => {
-                                if (confirm('Excluir funcionário?'))
-                                  setEmployees((old) => old.filter((x) => x.id !== e.id));
+                                void removeEmployee(e.id);
                               }}
                             >
                               <Trash2 size={15} />
@@ -1138,10 +1507,7 @@ export default function App() {
               <div className="panel-head">
                 <div>
                   <h2>{page === 'receitas' ? 'Entradas registradas' : 'Custos registrados'}</h2>
-                  <p>
-                    Ainda falta por no supabase para não perder dados
-                    {!supabase ? ' ·           ' : ''}
-                  </p>
+                  <p>Movimentações financeiras cadastradas</p>
                 </div>
                 <div className="searchbox">
                   <Search size={16} />
@@ -1275,22 +1641,28 @@ export default function App() {
               </div>
               <div className="setting-row">
                 <div>
-                  <b>Persistência local</b>
-                  <p>Os dados atuais ficam salvos neste navegador.</p>
+                  <b>{supabase ? 'Armazenamento remoto' : 'Persistência local'}</b>
+                  <p>
+                    {supabase
+                      ? 'Funcionários, lançamentos e registros da folha são sincronizados no Supabase.'
+                      : 'Os dados atuais ficam salvos neste navegador.'}
+                  </p>
                 </div>
-                <span className="tag good">Ativa</span>
+                <span className={`tag ${supabase ? 'good' : 'warn'}`}>
+                  {supabase ? 'Supabase' : 'Local'}
+                </span>
               </div>
               <div className="setting-row">
                 <div>
                   <b>Supabase</b>
                   <p>
                     {supabase
-                      ? 'As variáveis de ambiente foram encontradas.'
+                      ? `Conectado como ${user?.email || 'usuário autenticado'}.`
                       : 'Ainda não conectado. Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY no arquivo .env.local.'}
                   </p>
                 </div>
                 <span className={`tag ${supabase ? 'good' : 'warn'}`}>
-                  {supabase ? 'Configurado' : 'Pendente'}
+                  {supabase ? 'Conectado' : 'Pendente'}
                 </span>
               </div>
               <div className="setting-row">
